@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Masjid speaker placement</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+    #panel { position: absolute; top: 10px; left: 10px; background: rgba(20,20,20,.88); color: #eee;
+             padding: 10px 12px; border-radius: 8px; font-size: 13px; width: 320px;
+             max-height: calc(100vh - 70px); overflow-y: auto; }
+    #panel .row { margin: 8px 0; padding-bottom: 8px; border-bottom: 1px solid #333; }
+    #panel select, #panel input, #panel button { background: #222; color: #eee; border: 1px solid #555; border-radius: 4px; }
+    #panel select { max-width: 100%; }
+    #panel input[type=number] { width: 60px; }
+    #panel button { padding: 3px 8px; cursor: pointer; }
+    .info { color: #9ab; font-size: 12px; margin-top: 3px; }
+    .info i { color: #789; }
+    .legend span { display: inline-block; padding: 1px 6px; margin: 0 4px 4px 0; border-radius: 3px; color: #000; }
+    .meter { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 11px; color: #aaa; }
+    .bar { flex: 1; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+    .bar i { display: block; height: 100%; width: 0; }
+    #help { position: absolute; bottom: 10px; left: 10px; color: #aaa; font-size: 12px;
+            background: rgba(20,20,20,.7); padding: 6px 10px; border-radius: 6px; }
+  </style>
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  } }
+  </script>
+</head>
+<body>
+<div id="panel"></div>
+<div id="help">Drag a speaker or the green listener sphere &nbsp;|&nbsp; Shift+drag = up/down &nbsp;|&nbsp; Near a wall a speaker snaps on and faces the room</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* =====================================================================
+   1) ROOM (meters) - rectangular prism. Change to your measurements.
+   ===================================================================== */
+const W = 18, D = 14, H = 3.2;
+
+// Square column placeholders: [x, z, size]
+const COLUMNS = [
+  [ 6, -4, 0.6],
+  [ 6,  0, 0.6],
+  [ 6,  4, 0.6],
+];
+
+// Average sound absorption of the room surfaces (0 = bare concrete, 1 = absorbs everything).
+// Carpet + drop ceiling is roughly 0.2 - 0.3. This sets the reverb.
+const ABSORPTION = 0.25;
+
+const S_ROOM = 2 * (W * D + W * H + D * H);                 // total surface area
+const R_ROOM = S_ROOM * ABSORPTION / (1 - ABSORPTION);      // "room constant"
+const RT60 = 0.161 * (W * D * H) / (S_ROOM * ABSORPTION);   // Sabine reverb time (s)
+
+/* =====================================================================
+   2) SPEAKER MODELS  <-- ADD / EDIT REAL SPEAKERS HERE
+     sensitivity : dB SPL at 1 W / 1 m
+     hDeg / vDeg : horizontal / vertical coverage angle (-6 dB), degrees
+     note        : where the numbers came from (shown in the panel)
+   Manufacturer coverage angles are usually averaged over ~1-10 kHz;
+   real coverage is wider at low frequencies and narrower at high ones.
+   ===================================================================== */
+const MODELS = {
+  'Yamaha NS-AW350': {
+    sensitivity: 85.8, hDeg: 90, vDeg: 90,
+    note: 'Rated 87 dB @ 2.83 V into 6 ohm = 85.8 dB @ 1 W. Yamaha does not publish coverage, so 90x90 is an estimate.' },
+  'Tannoy Di5 DC': {
+    sensitivity: 88, hDeg: 90, vDeg: 90,
+    note: '88 dB @ 1 W / 1 m, 90 degree conical (-6 dB), from Tannoy data.' },
+  'EV EVID 3.2': {
+    sensitivity: 87, hDeg: 140, vDeg: 100,
+    note: '87 dB @ 1 W / 1 m, 140 x 100 (-6 dB), from EV data. (EV lists 120 x 100 on the newer 3.2TW.)' },
+  'Tannoy Di6 DC': {
+    sensitivity: 89, hDeg: 90, vDeg: 90,
+    note: '89 dB @ 1 W / 1 m, 90 degree conical (-6 dB), from Tannoy data.' },
+  'EV EVID 4.2': {
+    sensitivity: 89, hDeg: 120, vDeg: 80,
+    note: '89 dB @ 1 W / 1 m, 120 x 80 (-6 dB), from EV data.' },
+  'Proel Xenia X50': {
+    sensitivity: 90, hDeg: 90, vDeg: 60,
+    note: '90 dB @ 1 W / 1 m, 90 x 60 (-6 dB), from Proel data.' },
+  'Proel Xenia X80': {
+    sensitivity: 91, hDeg: 90, vDeg: 60,
+    note: '91 dB @ 1 W / 1 m from Proel data. Coverage not found, 90x60 is an estimate (same as the X50).' },
+};
+
+/* =====================================================================
+   3) SPEAKERS - starting positions (you can drag them after)
+   watts = typical program power, not the amp's maximum rating
+   ===================================================================== */
+const SPEAKERS = [
+  { name: 'Front L', model: 'EV EVID 4.2',   watts: 5, pos: [-6, 2.4, -6.75], aim: [0, 1.2, 0] },
+  { name: 'Front R', model: 'EV EVID 4.2',   watts: 5, pos: [ 3, 2.4, -6.75], aim: [0, 1.2, 0] },
+  { name: 'Rear',    model: 'Tannoy Di6 DC', watts: 3, pos: [ 0, 2.2,  6.75], aim: [0, 1.2, 0] },
+];
+
+const LEVELS = [100, 95, 90, 85, 80, 75];
+const LEVEL_COLORS = { 100: 0xff3b30, 95: 0xff9500, 90: 0xffe033, 85: 0x4cd964, 80: 0x32d2c8, 75: 0x3b82ff };
+
+const SPEAKER_RADIUS = 0.25; // clearance from columns / walls (m)
+const MAX_HEIGHT = H - 0.6;  // no ceiling speakers
+const MIN_HEIGHT = 0.3;
+const WALL_SNAP = 0.8;       // snap-to-wall distance (m)
+const TILT_DOWN = 10;        // degrees a wall speaker tilts down
+const CONE_LEN = 40;         // grey cone extends this far unless something blocks it (m)
+const REF_DB = 100;          // audio calibration: digital full scale = this many dB at 1 m
+
+/* ---------- Acoustics: direct sound + reverberant field ----------
+   Lw  = sound power level of the speaker
+   Q   = directivity factor (estimated from coverage angles)
+   Level on-axis at distance r:  Lp = Lw + 10*log10( Q/(4*pi*r^2) + 4/R )
+   The 4/R term is the reverberant field: it is why levels stop falling
+   with distance inside a real room. */
+function acoustics(cfg) {
+  const m = MODELS[cfg.model];
+  const spl1m = m.sensitivity + 10 * Math.log10(cfg.watts);
+  const Q = Math.max(1, 41253 / (m.hDeg * m.vDeg));
+  const Lw = spl1m - 10 * Math.log10(Q) + 11;
+  return { m, spl1m, Q, Lw,
+           floor: Lw + 10 * Math.log10(4 / R_ROOM),
+           crit: 0.141 * Math.sqrt(Q * R_ROOM) };
+}
+// distance (m) where on-axis level drops to L, or null if L is below the reverb floor
+function distFor(a, L) {
+  const rhs = Math.pow(10, (L - a.Lw) / 10) - 4 / R_ROOM;
+  return rhs > 0 ? Math.sqrt(a.Q / (4 * Math.PI * rhs)) : null;
+}
+
+/* ---------- Scene ---------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 9, 16);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.5, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(5, 10, 5);
+scene.add(sun);
+
+const mat = (color, extra = {}) =>
+  new THREE.MeshStandardMaterial({ color, side: THREE.DoubleSide, ...extra });
+
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D), mat(0x2f5d50));
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+const shell = new THREE.Mesh(
+  new THREE.BoxGeometry(W, H, D),
+  new THREE.MeshStandardMaterial({ color: 0xe8dcc0, transparent: true, opacity: 0.12, side: THREE.DoubleSide })
+);
+shell.position.y = H / 2;
+scene.add(shell);
+const edges = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, D)),
+  new THREE.LineBasicMaterial({ color: 0xccbb99 })
+);
+edges.position.y = H / 2;
+scene.add(edges);
+
+const colBoxes = COLUMNS.map(([x, z, s]) => {
+  const c = new THREE.Mesh(new THREE.BoxGeometry(s, H, s), mat(0xd9c9a3));
+  c.position.set(x, H / 2, z);
+  scene.add(c);
+  return new THREE.Box3(new THREE.Vector3(x - s / 2, 0, z - s / 2),
+                        new THREE.Vector3(x + s / 2, H, z + s / 2));
+});
+
+/* ---------- Collision helpers ---------- */
+function constrain(p) {
+  const r = SPEAKER_RADIUS;
+  p.x = THREE.MathUtils.clamp(p.x, -W / 2 + r, W / 2 - r);
+  p.z = THREE.MathUtils.clamp(p.z, -D / 2 + r, D / 2 - r);
+  p.y = THREE.MathUtils.clamp(p.y, MIN_HEIGHT, MAX_HEIGHT);
+  colBoxes.forEach(b => {
+    const minX = b.min.x - r, maxX = b.max.x + r, minZ = b.min.z - r, maxZ = b.max.z + r;
+    if (p.x > minX && p.x < maxX && p.z > minZ && p.z < maxZ) {
+      const push = [
+        [p.x - minX, () => p.x = minX],
+        [maxX - p.x, () => p.x = maxX],
+        [p.z - minZ, () => p.z = minZ],
+        [maxZ - p.z, () => p.z = maxZ],
+      ].sort((a, b) => a[0] - b[0])[0];
+      push[1]();
+    }
+  });
+}
+
+function wallSnap(p) {
+  const r = SPEAKER_RADIUS;
+  const walls = [
+    { d: p.x - (-W / 2 + r), n: [ 1, 0], snap: () => p.x = -W / 2 + r },
+    { d: (W / 2 - r) - p.x,  n: [-1, 0], snap: () => p.x =  W / 2 - r },
+    { d: p.z - (-D / 2 + r), n: [ 0, 1], snap: () => p.z = -D / 2 + r },
+    { d: (D / 2 - r) - p.z,  n: [ 0,-1], snap: () => p.z =  D / 2 - r },
+  ].sort((a, b) => a.d - b.d);
+  const w = walls[0];
+  if (w.d > WALL_SNAP) return null;
+  w.snap();
+  return w.n;
+}
+
+function inwardAim(p, n) {
+  const dist = 5;
+  const drop = Math.tan(THREE.MathUtils.degToRad(TILT_DOWN)) * dist;
+  return [p.x + n[0] * dist, p.y - drop, p.z + n[1] * dist];
+}
+
+const _ray = new THREE.Ray(), _hit = new THREE.Vector3(), _dir = new THREE.Vector3();
+
+// Line of sight blocked by a column?
+function blocked(a, b) {
+  _dir.subVectors(b, a);
+  const len = _dir.length();
+  _ray.set(a, _dir.normalize());
+  return colBoxes.some(box => {
+    const h = _ray.intersectBox(box, _hit);
+    return h && a.distanceTo(h) < len;
+  });
+}
+
+// How far (m) can you travel from origin along dirW (unit vector) before
+// hitting a wall, the floor, the ceiling, or a column? Capped at maxT.
+function obstruction(origin, dirW, maxT) {
+  const lim = (o, d, lo, hi) => d > 1e-9 ? (hi - o) / d : d < -1e-9 ? (lo - o) / d : Infinity;
+  let t = Math.min(maxT,
+    lim(origin.x, dirW.x, -W / 2, W / 2),
+    lim(origin.y, dirW.y, 0, H),
+    lim(origin.z, dirW.z, -D / 2, D / 2));
+  _ray.set(origin, dirW);
+  for (const box of colBoxes) {
+    const h = _ray.intersectBox(box, _hit);
+    if (h) t = Math.min(t, origin.distanceTo(h));
+  }
+  return t;
+}
+
+/* ---------- Speakers ---------- */
+SPEAKERS.forEach(cfg => {
+  const p = new THREE.Vector3(...cfg.pos);
+  constrain(p);
+  const n = wallSnap(p);
+  if (n) { constrain(p); cfg.aim = inwardAim(p, n); }
+  cfg.pos = [p.x, p.y, p.z];
+});
+
+const speakers = SPEAKERS.map(cfg => {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.55, 0.4), mat(0x333333));
+  root.add(body);
+  scene.add(root);
+  return { cfg, root, body, cones: null, info: null, meters: [], audio: null };
+});
+
+/* ---------- Listener (green sphere, drag it around) ---------- */
+const listenerMesh = new THREE.Mesh(
+  new THREE.SphereGeometry(0.22, 24, 16),
+  new THREE.MeshStandardMaterial({ color: 0x22cc66, emissive: 0x115533 })
+);
+listenerMesh.position.set(0, 1.2, 1);
+const nose = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.3, 12), new THREE.MeshStandardMaterial({ color: 0x22cc66 }));
+nose.geometry.rotateX(-Math.PI / 2);   // points toward -Z (the front wall)
+nose.position.z = -0.3;
+listenerMesh.add(nose);
+scene.add(listenerMesh);
+const listenerPos = listenerMesh.position;
+
+/* ---------- Cone builder: grey volume + dB bands, clipped by walls and columns ---------- */
+function rebuildCone(s) {
+  const { cfg, root } = s;
+  if (s.cones) {
+    root.remove(s.cones);
+    s.cones.traverse(o => { o.geometry && o.geometry.dispose(); o.material && o.material.dispose(); });
+  }
+  root.position.set(...cfg.pos);
+  root.lookAt(...cfg.aim);
+  root.updateMatrixWorld(true);
+
+  const a = acoustics(cfg);
+  const hT = Math.tan(THREE.MathUtils.degToRad(a.m.hDeg / 2));
+  const vT = Math.tan(THREE.MathUtils.degToRad(a.m.vDeg / 2));
+  const origin = new THREE.Vector3(...cfg.pos);
+  const cones = new THREE.Group();
+
+  // direction in the speaker's local frame at "depth 1"; f = 0 is the axis, f = 1 is the cone edge
+  const dirL = (f, ang) => new THREE.Vector3(Math.cos(ang) * hT * f, Math.sin(ang) * vT * f, 1);
+  // how far along local vector v we get (up to zMax depth) before something blocks it
+  const clipT = (v, zMax) => {
+    const len = v.length();
+    const dirW = v.clone().transformDirection(root.matrixWorld);
+    return { len, t: obstruction(origin, dirW, len * zMax) };
+  };
+
+  // --- semi-transparent grey cone, cut off where it hits walls / floor / ceiling / columns
+  const K = 4, N = 64, verts = [0, 0, 0], idx = [];
+  for (let j = 0; j <= K; j++) for (let i = 0; i < N; i++) {
+    const v = dirL(j / K, (i / N) * Math.PI * 2);
+    const { len, t } = clipT(v, CONE_LEN);
+    v.multiplyScalar(t / len);
+    verts.push(v.x, v.y, v.z);
+  }
+  const at = (j, i) => 1 + j * N + (i % N);
+  for (let j = 0; j < K; j++) for (let i = 0; i < N; i++)
+    idx.push(at(j, i), at(j + 1, i), at(j + 1, i + 1), at(j, i), at(j + 1, i + 1), at(j, i + 1));
+  for (let i = 0; i < N; i++) idx.push(0, at(K, i), at(K, i + 1));
+  const cg = new THREE.BufferGeometry();
+  cg.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  cg.setIndex(idx);
+  cones.add(new THREE.Mesh(cg, new THREE.MeshBasicMaterial({
+    color: 0xaaaaaa, transparent: true, opacity: 0.13, side: THREE.DoubleSide, depthWrite: false })));
+
+  // edge lines
+  const spokes = [];
+  for (let q = 0; q < 4; q++) {
+    const k = at(K, q * (N / 4));
+    spokes.push(0, 0, 0, verts[3 * k], verts[3 * k + 1], verts[3 * k + 2]);
+  }
+  const sg = new THREE.BufferGeometry();
+  sg.setAttribute('position', new THREE.Float32BufferAttribute(spokes, 3));
+  cones.add(new THREE.LineSegments(sg, new THREE.LineBasicMaterial({ color: 0x999999, transparent: true, opacity: 0.5 })));
+
+  // --- dB bands: only drawn where nothing is in the way
+  const reached = [];
+  LEVELS.forEach(L => {
+    const d = distFor(a, L);
+    if (d === null || d < 0.3) return;
+    reached.push(`${L} dB @ ${d.toFixed(1)} m`);
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const vm = dirL(1, ((i + 0.5) / N) * Math.PI * 2);
+      const { len, t } = clipT(vm, d);
+      if (t < len * d - 1e-3) continue;      // wall or column blocks this piece of the ring
+      pts.push(dirL(1, (i / N) * Math.PI * 2).multiplyScalar(d),
+               dirL(1, ((i + 1) / N) * Math.PI * 2).multiplyScalar(d));
+    }
+    if (pts.length) cones.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: LEVEL_COLORS[L] })));
+  });
+
+  root.add(cones);
+  s.cones = cones;
+  if (s.info) {
+    s.info.innerHTML =
+      `<i>${a.m.note}</i><br>` +
+      `1 m: ${a.spl1m.toFixed(0)} dB &middot; reverb floor ${a.floor.toFixed(0)} dB &middot; critical dist ${a.crit.toFixed(1)} m` +
+      `<br>${reached.join(' | ') || 'no band is above the reverb floor'}` +
+      `<br>pos: x ${cfg.pos[0].toFixed(1)}, y ${cfg.pos[1].toFixed(1)}, z ${cfg.pos[2].toFixed(1)}`;
+  }
+}
+
+/* ---------- Estimated level at the listener ---------- */
+let lvlEl = null;
+function updateLevel() {
+  if (!lvlEl) return;
+  let E = 0;
+  speakers.forEach(s => {
+    const a = acoustics(s.cfg);
+    const sp = new THREE.Vector3(...s.cfg.pos);
+    const r = Math.max(0.3, sp.distanceTo(listenerPos));
+    const loc = s.root.worldToLocal(listenerPos.clone());
+    let att = -30;                                   // behind the speaker
+    if (loc.z > 0) {
+      const th = Math.atan2(loc.x, loc.z) * 180 / Math.PI;
+      const tv = Math.atan2(loc.y, loc.z) * 180 / Math.PI;
+      att = Math.max(-30, -6 * ((th / (a.m.hDeg / 2)) ** 2 + (tv / (a.m.vDeg / 2)) ** 2));
+    }
+    let direct = a.spl1m + att - 20 * Math.log10(r);
+    if (blocked(sp, listenerPos)) direct -= 10;      // rough column shadow
+    E += Math.pow(10, direct / 10) + Math.pow(10, a.floor / 10);
+  });
+  lvlEl.textContent = `\u2248 ${(10 * Math.log10(E)).toFixed(0)} dB SPL at the listener (all speakers combined)`;
+}
+
+/* ---------- Audio (Web Audio) ---------- */
+let actx = null, input = null, master = null, reverb = null, noiseNode = null, reverbOn = true;
+
+function makeIR() {            // synthetic room reverb: decaying noise with the room's RT60
+  const sr = actx.sampleRate, len = Math.floor(sr * Math.min(RT60 * 1.2, 4));
+  const buf = actx.createBuffer(2, len, sr);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    let e = 0;
+    for (let i = 0; i < len; i++) { d[i] = (Math.random() * 2 - 1) * Math.exp(-6.91 * (i / sr) / RT60); e += d[i] * d[i]; }
+    const k = 1 / Math.sqrt(e);
+    for (let i = 0; i < len; i++) d[i] *= k;
+  }
+  return buf;
+}
+function makePink() {
+  const len = actx.sampleRate * 4, buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+  for (let i = 0; i < len; i++) {
+    const w = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759;
+    b2 = 0.96900 * b2 + w * 0.1538520; b3 = 0.86650 * b3 + w * 0.3104856;
+    b4 = 0.55000 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.0168980;
+    d[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
+    b6 = w * 0.115926;
+  }
+  return buf;
+}
+function setPannerPose(p, pos, dir) {
+  if (p.positionX) {
+    p.positionX.value = pos.x; p.positionY.value = pos.y; p.positionZ.value = pos.z;
+    p.orientationX.value = dir.x; p.orientationY.value = dir.y; p.orientationZ.value = dir.z;
+  } else { p.setPosition(pos.x, pos.y, pos.z); p.setOrientation(dir.x, dir.y, dir.z); }
+}
+function updateListenerAudio() {
+  if (!actx) return;
+  const L = actx.listener;
+  if (L.positionX) {
+    L.positionX.value = listenerPos.x; L.positionY.value = listenerPos.y; L.positionZ.value = listenerPos.z;
+    L.forwardX.value = 0; L.forwardY.value = 0; L.forwardZ.value = -1;   // listener faces the front wall
+    L.upX.value = 0; L.upY.value = 1; L.upZ.value = 0;
+  } else { L.setPosition(listenerPos.x, listenerPos.y, listenerPos.z); L.setOrientation(0, 0, -1, 0, 1, 0); }
+}
+function updateAudio(s) {
+  if (!actx || !s.audio) return;
+  const a = acoustics(s.cfg);
+  s.audio.gain.gain.value = Math.pow(10, (a.spl1m - REF_DB) / 20);
+  s.audio.send.gain.value = reverbOn ? Math.sqrt((4 / R_ROOM) / (a.Q / (4 * Math.PI))) : 0;
+  const p = s.audio.panner;
+  p.coneInnerAngle = a.m.hDeg;
+  p.coneOuterAngle = Math.min(360, a.m.hDeg * 2);
+  p.coneOuterGain = 0.15;
+  const dir = new THREE.Vector3(0, 0, 1).transformDirection(s.root.matrixWorld);
+  setPannerPose(p, new THREE.Vector3(...s.cfg.pos), dir);
+}
+function initAudio() {
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  input = actx.createGain();
+  master = actx.createGain(); master.gain.value = 0.5;
+  const comp = actx.createDynamicsCompressor();        // safety limiter
+  master.connect(comp); comp.connect(actx.destination);
+  reverb = actx.createConvolver(); reverb.normalize = false; reverb.buffer = makeIR(); reverb.connect(master);
+
+  speakers.forEach(s => {
+    const gain = actx.createGain();
+    const an = actx.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0.7;
+    const send = actx.createGain();
+    const panner = actx.createPanner();
+    panner.panningModel = 'HRTF'; panner.distanceModel = 'inverse'; panner.refDistance = 1; panner.rolloffFactor = 1;
+    input.connect(gain);
+    gain.connect(an);
+    gain.connect(panner); panner.connect(master);
+    gain.connect(send); send.connect(reverb);
+    s.audio = { gain, an, send, panner, data: new Uint8Array(an.frequencyBinCount) };
+    updateAudio(s);
+  });
+  updateListenerAudio();
+
+  const aud = document.getElementById('aud');
+  actx.createMediaElementSource(aud).connect(input);
+  aud.addEventListener('play', () => actx.resume());
+}
+
+const BANDS = [[20, 250], [250, 4000], [4000, 16000]];   // low, mid, high (Hz)
+function animateAudio() {
+  const binHz = actx.sampleRate / 1024;
+  speakers.forEach(s => {
+    const A = s.audio; if (!A) return;
+    A.an.getByteFrequencyData(A.data);
+    const lv = BANDS.map(([lo, hi]) => {
+      const i0 = Math.max(1, Math.floor(lo / binHz)), i1 = Math.min(A.data.length - 1, Math.floor(hi / binHz));
+      let sum = 0;
+      for (let i = i0; i <= i1; i++) sum += A.data[i];
+      return sum / (i1 - i0 + 1) / 255;
+    });
+    s.meters.forEach((el, k) => el.style.width = (lv[k] * 100).toFixed(0) + '%');
+    s.body.material.emissive.setRGB(lv[0], lv[1], lv[2]);   // red = bass, green = mids, blue = highs
+    s.body.scale.setScalar(1 + lv[0] * 0.25);               // pulses with the bass
+  });
+}
+
+/* ---------- UI panel ---------- */
+const panel = document.getElementById('panel');
+panel.innerHTML = '<b>Speakers</b>';
+speakers.forEach((s, i) => {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `
+    <div><b>${s.cfg.name}</b></div>
+    <select data-i="${i}" data-k="model">
+      ${Object.keys(MODELS).map(n => `<option ${n === s.cfg.model ? 'selected' : ''}>${n}</option>`).join('')}
+    </select>
+    <input type="number" min="0.1" max="2000" step="0.5" value="${s.cfg.watts}" data-i="${i}" data-k="watts"> W
+    <div class="info"></div>
+    <div class="meter">L<div class="bar"><i style="background:#ff5a4f"></i></div>
+                       M<div class="bar"><i style="background:#4cd964"></i></div>
+                       H<div class="bar"><i style="background:#4aa3ff"></i></div></div>`;
+  s.info = row.querySelector('.info');
+  s.meters = [...row.querySelectorAll('.bar i')];
+  panel.appendChild(row);
+  rebuildCone(s);
+});
+
+panel.insertAdjacentHTML('beforeend', `
+  <div class="row"><div class="legend">${LEVELS.map(L =>
+    `<span style="background:#${LEVEL_COLORS[L].toString(16).padStart(6, '0')}">${L} dB</span>`).join('')}</div>
+    <div class="info">Room ${W} x ${D} x ${H} m &middot; absorption ${ABSORPTION} &middot; RT60 &asymp; ${RT60.toFixed(2)} s.
+    Bands stop at the reverb floor and where walls or columns cut them off.</div></div>
+  <div class="row"><b>Listener</b> (green sphere)<div class="info" id="lvl"></div></div>
+  <div class="row"><b>Sound</b><br>
+    <button id="audioOn">Enable audio</button>
+    <div class="info">Use headphones for the 3D positioning.</div>
+    <div id="audioCtl" style="display:none; margin-top:6px">
+      <button id="azanBtn">Built-in azan</button>
+      <button id="noiseBtn">Pink noise: off</button>
+      <input type="file" id="file" accept="audio/*" style="width:100%; margin-top:6px">
+      <audio id="aud" src="azan.mp3" controls loop preload="auto" style="width:100%; margin-top:6px"></audio>
+      <div class="info" id="audMsg"></div>
+      <div>Volume <input type="range" id="vol" min="0" max="1" step="0.01" value="0.5" style="width:120px; vertical-align:middle">
+      <label><input type="checkbox" id="revOn" checked> Room reverb</label></div>
+    </div>
+  </div>`);
+lvlEl = document.getElementById('lvl');
+updateLevel();
+
+panel.addEventListener('change', e => {
+  const { i, k } = e.target.dataset;
+  if (i === undefined) return;
+  const s = speakers[i];
+  s.cfg[k] = k === 'watts' ? Math.max(0.1, +e.target.value) : e.target.value;
+  rebuildCone(s); updateAudio(s); updateLevel();
+});
+
+const aud = document.getElementById('aud');
+const audMsg = document.getElementById('audMsg');
+aud.addEventListener('error', () => {
+  audMsg.textContent = 'Could not load this audio. For the built-in azan, azan.mp3 must be in the same folder as index.html.';
+});
+aud.addEventListener('loadeddata', () => { audMsg.textContent = ''; });
+
+document.getElementById('audioOn').onclick = e => {
+  if (!actx) initAudio();
+  actx.resume();
+  document.getElementById('audioCtl').style.display = 'block';
+  e.target.style.display = 'none';
+};
+document.getElementById('azanBtn').onclick = () => {
+  actx.resume();
+  aud.src = 'azan.mp3';
+  aud.play();
+};
+document.getElementById('noiseBtn').onclick = e => {
+  actx.resume();
+  if (noiseNode) { noiseNode.stop(); noiseNode.disconnect(); noiseNode = null; e.target.textContent = 'Pink noise: off'; }
+  else {
+    noiseNode = actx.createBufferSource();
+    noiseNode.buffer = makePink(); noiseNode.loop = true;
+    noiseNode.connect(input); noiseNode.start();
+    e.target.textContent = 'Pink noise: ON';
+  }
+};
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  aud.src = URL.createObjectURL(f);
+  aud.play();
+};
+document.getElementById('vol').oninput = e => { if (master) master.gain.value = +e.target.value; };
+document.getElementById('revOn').onchange = e => { reverbOn = e.target.checked; speakers.forEach(updateAudio); };
+
+/* ---------- Dragging (speakers and listener) ---------- */
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+const hitPoint = new THREE.Vector3();
+let drag = null;
+
+function setMouse(e) {
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(mouse, camera);
+}
+function pickTarget() {
+  const hit = raycaster.intersectObjects([...speakers.map(s => s.body), listenerMesh])[0];
+  if (!hit) return null;
+  return hit.object === listenerMesh ? { listener: true } : { s: speakers.find(s => s.body === hit.object) };
+}
+const posOf = t => t.listener ? listenerPos.clone() : new THREE.Vector3(...t.s.cfg.pos);
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  setMouse(e);
+  const t = pickTarget();
+  if (!t) return;
+  const p = posOf(t);
+  const vertical = e.shiftKey;
+  if (vertical) {
+    const n = new THREE.Vector3(camera.position.x - p.x, 0, camera.position.z - p.z).normalize();
+    dragPlane.setFromNormalAndCoplanarPoint(n, p);
+  } else {
+    dragPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), p);
+  }
+  raycaster.ray.intersectPlane(dragPlane, hitPoint);
+  drag = { t, vertical, offset: hitPoint.clone().sub(p) };
+  controls.enabled = false;
+  renderer.domElement.setPointerCapture(e.pointerId);
+});
+
+renderer.domElement.addEventListener('pointermove', e => {
+  setMouse(e);
+  if (!drag) {
+    renderer.domElement.style.cursor = pickTarget() ? 'grab' : 'default';
+    return;
+  }
+  if (!raycaster.ray.intersectPlane(dragPlane, hitPoint)) return;
+  const { t, vertical, offset } = drag;
+  const old = posOf(t);
+  const p = old.clone();
+  const target = hitPoint.clone().sub(offset);
+  if (vertical) p.y = target.y; else { p.x = target.x; p.z = target.z; }
+  constrain(p);
+
+  if (t.listener) {
+    listenerPos.copy(p);
+    updateListenerAudio();
+  } else {
+    const s = t.s;
+    const n = wallSnap(p);
+    if (n) { constrain(p); s.cfg.aim = inwardAim(p, n); }
+    else {
+      const delta = p.clone().sub(old);
+      s.cfg.aim = [s.cfg.aim[0] + delta.x, s.cfg.aim[1] + delta.y, s.cfg.aim[2] + delta.z];
+    }
+    s.cfg.pos = [p.x, p.y, p.z];
+    rebuildCone(s);
+    updateAudio(s);
+  }
+  updateLevel();
+  renderer.domElement.style.cursor = 'grabbing';
+});
+
+const endDrag = () => { drag = null; controls.enabled = true; };
+renderer.domElement.addEventListener('pointerup', endDrag);
+renderer.domElement.addEventListener('pointercancel', endDrag);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+renderer.setAnimationLoop(() => {
+  controls.update();
+  if (actx) animateAudio();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
