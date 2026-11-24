@@ -515,6 +515,7 @@ panel.insertAdjacentHTML('beforeend', `
     <div id="audioCtl" style="display:none; margin-top:6px">
       <button id="noiseBtn">Pink noise: off</button>
       <input type="file" id="file" accept="audio/*" style="width:100%; margin-top:6px">
+      <audio id="aud" src="azan.mp3" controls loop preload="auto" style="width:100%; margin-top:6px"></audio>
       <audio id="aud" controls loop preload="auto" style="width:100%; margin-top:6px"></audio>
       <div class="info" id="audMsg"></div>
       <div>Volume <input type="range" id="vol" min="0" max="1" step="0.01" value="0.5" style="width:120px; vertical-align:middle">
@@ -534,7 +535,8 @@ panel.addEventListener('change', e => {
 
 const aud = document.getElementById('aud');
 const audMsg = document.getElementById('audMsg');
-
+aud.addEventListener('error', () => {
+  audMsg.textContent = 'Could not load this audio. For the built-in azan, azan.mp3 must be in the same folder as index.html.';
 });
 aud.addEventListener('loadeddata', () => { audMsg.textContent = ''; });
 
@@ -649,4 +651,4 @@ renderer.setAnimationLoop(() => {
 </script>
 </body>
 </html>
-
+~
